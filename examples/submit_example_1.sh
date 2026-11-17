@@ -5,11 +5,11 @@
 #SBATCH -c 2
 #SBATCH --output=example_1.out
 
-source activate mlfold
+# source activate mlfold
 
-folder_with_pdbs="../inputs/PDB_monomers/pdbs/"
+folder_with_pdbs="../pdb_results/structures/monomers/"
 
-output_dir="../outputs/example_1_outputs"
+output_dir="../outputs/test_outputs"
 if [ ! -d $output_dir ]
 then
     mkdir -p $output_dir
