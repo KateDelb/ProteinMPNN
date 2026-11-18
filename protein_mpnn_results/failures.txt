@@ -1,0 +1,3 @@
+2CBZ.pdb	ValueError: Designed length 231 (after removing 0 X placeholders) != input chain length 230
+3J7H.pdb	OutOfMemoryError: CUDA out of memory. Tried to allocate 15.91 GiB. GPU 0 has a total capacty of 44.42 GiB of which 9.06 GiB is free. Including non-PyTorch memory, this process has 35.35 GiB memory in use. Of the allocated memory 34.01 GiB is allocated by PyTorch, and 1.03 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting max_split_size_mb to avoid fragmentation.  See documentation for Memory Management and PYTORCH_CUDA_ALLOC_CONF
+4MCK.pdb	KeyError: 'UNK'

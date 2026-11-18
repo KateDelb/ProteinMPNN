@@ -3,6 +3,7 @@
 For each designed sequence this reports:
 - mpnn_score: ProteinMPNN's own score (average negative log-probability of the designed residues; lower is more confident)
 - plddt: mean pLDDT (0-100) of the structure ESMFold predicts for the designed sequence
+- x_removed: placeholder X residues (missing/non-standard residues in the input) dropped from the sequence before folding
 - tm_score: TM-score (TM-align, normalised by the input structure's length) between that predicted structure and the input PDB
 
 Pipeline: protein_mpnn_run.py  ->  ESMFold (transformers, needs a GPU in practice)  ->  tmtools.tm_align
@@ -86,10 +87,19 @@ def read_ca_chain(pdb: Path, chain_id: str) -> tuple[list[tuple[float, float, fl
     chain = structure[0][chain_id]
     coords, sequence = [], []
     for residue in chain:
-        if residue.id[0] != " " or "CA" not in residue:
+        resname = residue.get_resname()
+        if resname == "MSE":  # selenomethionine: ProteinMPNN reads it as methionine, so do we
+            resname = "MET"
+        elif residue.id[0] != " ":
+            continue
+        if "CA" not in residue:
+            continue
+        try:
+            letter = index_to_one(three_to_index(resname))
+        except KeyError:  # non-standard residue (e.g. UNK): ProteinMPNN turns it into an X, removed below
             continue
         coords.append(tuple(residue["CA"].coord))
-        sequence.append(index_to_one(three_to_index(residue.get_resname())))
+        sequence.append(letter)
     return coords, "".join(sequence)
 
 
@@ -143,13 +153,15 @@ def collect_pdbs(inputs: list[Path]) -> list[Path]:
     return pdbs
 
 
-def load_esmfold():
+def load_esmfold(chunk_size: int | None = None):
     import torch
     from transformers import EsmForProteinFolding
 
     print(f"Loading {ESMFOLD_MODEL} (GPU recommended)")
     model = EsmForProteinFolding.from_pretrained(ESMFOLD_MODEL, low_cpu_mem_usage=True)
     model = model.cuda() if torch.cuda.is_available() else model.cpu()
+    if chunk_size:  # fold long chains in chunks: slower, but needs far less GPU memory
+        model.trunk.set_chunk_size(chunk_size)
     return model.eval()
 
 
@@ -169,17 +181,25 @@ def process_pdb(args: argparse.Namespace, pdb: Path, out_dir: Path, model) -> li
     import torch
 
     native_ca, native_seq = read_ca_chain(pdb, chains)
+    # ProteinMPNN writes an X for every residue number missing from the structure (unresolved
+    # residues, numbering gaps) and for non-standard residues. They are placeholders, not designed
+    # positions, and read_ca_chain has no residue for them, so drop them before folding. (The fold
+    # then sees the chain without the gap; x_removed records how many residues that was.)
+    designs = [(name, score, sequence.replace("X", ""), sequence.count("X")) for name, score, sequence in designs]
     if len(designs[0][2]) != len(native_seq):
-        raise ValueError(f"Designed length {len(designs[0][2])} != input chain length {len(native_seq)}")
+        raise ValueError(
+            f"Designed length {len(designs[0][2])} (after removing {designs[0][3]} X placeholders) "
+            f"!= input chain length {len(native_seq)}"
+        )
     folded_dir = out_dir / "folded"
     folded_dir.mkdir(exist_ok=True)
-    for name, score, sequence in designs:
+    for name, score, sequence, x_removed in designs:
         with torch.no_grad():
             pdb_text, plddt = fold_esmfold(sequence, model)
         (folded_dir / f"{name}.pdb").write_text(pdb_text)
         tm = tm_score(ca_from_pdb_text(pdb_text), sequence, native_ca, native_seq)
         rows.append(
-            dict(pdb=pdb.stem, chain=chains, design=name, mpnn_score=score, plddt=round(plddt, 2), tm_score=round(tm, 4), sequence=sequence)
+            dict(pdb=pdb.stem, chain=chains, design=name, mpnn_score=score, plddt=round(plddt, 2), tm_score=round(tm, 4), x_removed=x_removed, sequence=sequence)
         )
         print(f"{pdb.stem} {name}: pLDDT {plddt:.1f}, TM-score {tm:.3f}")
     return rows
@@ -205,6 +225,7 @@ def main() -> None:
     parser.add_argument("--backbone-noise", type=float, default=0.0, help="Gaussian noise on backbone atoms (default 0)")
     parser.add_argument("--omit-aas", default="X", help="Amino acids to leave out of designs (default X)")
     parser.add_argument("--out-dir", type=Path, default=HERE / "results", help="Output folder (default: results/ next to this script)")
+    parser.add_argument("--chunk-size", type=int, default=None, help="ESMFold chunk size (e.g. 64) to fold long chains with less GPU memory; slower (default: off)")
     parser.add_argument("--skip-fold", action="store_true", help="Only run ProteinMPNN; skip ESMFold and TM-score")
     args = parser.parse_args()
 
@@ -213,7 +234,7 @@ def main() -> None:
         raise SystemExit("No .pdb files found")
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
-    model = None if args.skip_fold else load_esmfold()
+    model = None if args.skip_fold else load_esmfold(args.chunk_size)
 
     all_rows, failures = [], []
     for i, pdb in enumerate(pdbs, 1):
