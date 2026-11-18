@@ -2,12 +2,13 @@
 
 Reads designs_all.csv (columns pdb, chain, design, mpnn_score, plddt, tm_score,
 sequence) and draws one point per designed variant. The pLDDT axis shows delta pLDDT (design minus native);
-points are coloured by the `included` cutoffs, which use absolute pLDDT.
+green points are the designs marked `included` in the CSV (TM > 0.5, delta pLDDT > -10,
+pLDDT > 70; the cutoffs are set at the top of this script and written to the CSV on every run).
 Saves a PNG to plots/ and optionally opens an interactive window (--show).
 
 If native_baseline*.csv files (from fold_native_baseline.py) sit next to designs_all.csv, the
 script also adds native_plddt, native_tm_score and delta_plddt (design pLDDT minus the pLDDT of
-the native sequence folded the same way) to the CSV with --annotate, and draws density plots of
+the native sequence folded the same way) to the CSV, and draws density plots of
 TM-score and delta pLDDT, like panels B and C of Wittmann et al. Structures without a baseline
 yet have empty delta values and are left out of those plots.
 """
@@ -23,16 +24,19 @@ import pandas as pd
 from scipy.stats import gaussian_kde
 
 DEFAULT_CSV = Path(__file__).resolve().parent / "protein_mpnn_results/designs_all.csv"
-# viability filters: a design passes when all three hold
-MIN_PLDDT, MIN_TM, MAX_MPNN = 70,0.5, 1.0
-MIN_DELTA_PLDDT = -10  # used by the TM / delta pLDDT / pLDDT plot only (not by `included`)
+# selection cutoffs: a design is selected (green in the plots, `included` in the CSV) when all three hold
+MIN_PLDDT, MIN_TM = 70, 0.5
+MIN_DELTA_PLDDT = -10
 PASS_COLOR, PASS_EDGE, FAIL_COLOR = "#2ca02c", "#1b6b1b", "#bdbdbd"
 PLOTS_DIR = Path(__file__).resolve().parent / "protein_mpnn_results/plots"
 
 
-def viable_mask(df: pd.DataFrame) -> pd.Series:
-    """True for designs inside the viability box (missing scores count as not included)."""
-    return (df["plddt"] > MIN_PLDDT) & (df["tm_score"] > MIN_TM) & (df["mpnn_score"] < MAX_MPNN)
+def selected_mask(df: pd.DataFrame) -> pd.Series:
+    """The designs marked green in the plots: TM > cutoff, delta pLDDT > cutoff and pLDDT > cutoff."""
+    return (df["tm_score"] > MIN_TM) & (df["delta_plddt"] > MIN_DELTA_PLDDT) & (df["plddt"] > MIN_PLDDT)
+
+
+SELECTION_LABEL = f"selected (TM>{MIN_TM}, \u0394pLDDT>{MIN_DELTA_PLDDT}, pLDDT>{MIN_PLDDT})"
 
 
 def add_native(df: pd.DataFrame, csv_path: Path) -> pd.DataFrame:
@@ -48,9 +52,9 @@ def add_native(df: pd.DataFrame, csv_path: Path) -> pd.DataFrame:
 
 
 def annotate_csv(csv_path: Path) -> None:
-    """Add (or refresh) an `included` column (inside the viability box) and the native-baseline columns."""
+    """Add (or refresh) an `included` column (= the selected designs, green in the plots) and the native-baseline columns."""
     df = add_native(pd.read_csv(csv_path), csv_path)
-    df["included"] = viable_mask(df)
+    df["included"] = selected_mask(df)
     df.to_csv(csv_path, index=False)
     print(f"Wrote 'included' to {csv_path} ({df['included'].sum()} of {len(df)} True)")
     if "delta_plddt" in df:
@@ -84,11 +88,11 @@ def plot_density(df: pd.DataFrame, output: Path) -> None:
 def plot_tm_vs_delta(df: pd.DataFrame, output: Path) -> None:
     """2D scatter of TM-score against delta pLDDT (the 3D plot without the MPNN score)."""
     df = df.dropna(subset=["tm_score", "delta_plddt"])
-    passed = viable_mask(df)
+    passed = df["included"]
     fig, ax = plt.subplots(figsize=(7, 5.5))
     for mask, color, edge, label in [
-        (~passed, FAIL_COLOR, "#8c8c8c", "fails a cutoff (absolute pLDDT)"),
-        (passed, PASS_COLOR, PASS_EDGE, f"passes (pLDDT>{MIN_PLDDT}, TM>{MIN_TM}, MPNN<{MAX_MPNN})"),
+        (~passed, FAIL_COLOR, "#8c8c8c", "not selected"),
+        (passed, PASS_COLOR, PASS_EDGE, SELECTION_LABEL),
     ]:
         sub = df[mask]
         ax.scatter(sub["tm_score"], sub["delta_plddt"], color=color, s=22, alpha=0.8, edgecolor=edge,
@@ -109,8 +113,8 @@ def plot_tm_vs_delta(df: pd.DataFrame, output: Path) -> None:
 def plot_tm_delta_plddt(df: pd.DataFrame, output: Path) -> None:
     """3D scatter of TM-score, delta pLDDT and pLDDT, with the box TM > cutoff, delta pLDDT > cutoff, pLDDT > cutoff."""
     df = df.dropna(subset=["tm_score", "delta_plddt", "plddt"])
-    passed = (df["tm_score"] > MIN_TM) & (df["delta_plddt"] > MIN_DELTA_PLDDT) & (df["plddt"] > MIN_PLDDT)
-    label_pass = f"passes (TM>{MIN_TM}, \u0394pLDDT>{MIN_DELTA_PLDDT}, pLDDT>{MIN_PLDDT})"
+    passed = df["included"]
+    label_pass = SELECTION_LABEL
     print(f"{passed.sum()} of {len(df)} designs pass the cutoffs")
     print(f"  TM>{MIN_TM}: {(df['tm_score'] > MIN_TM).sum()}, \u0394pLDDT>{MIN_DELTA_PLDDT}: "
           f"{(df['delta_plddt'] > MIN_DELTA_PLDDT).sum()}, pLDDT>{MIN_PLDDT}: {(df['plddt'] > MIN_PLDDT).sum()}")
@@ -118,7 +122,7 @@ def plot_tm_delta_plddt(df: pd.DataFrame, output: Path) -> None:
     fig = plt.figure(figsize=(8, 6.5))
     ax = fig.add_subplot(projection="3d")
     for mask, color, edge, label in [
-        (~passed, FAIL_COLOR, "#8c8c8c", "fails a cutoff"),
+        (~passed, FAIL_COLOR, "#8c8c8c", "not selected"),
         (passed, PASS_COLOR, PASS_EDGE, label_pass),
     ]:
         sub = df[mask]
@@ -158,13 +162,11 @@ def plot_folding_scores(csv_path: Path, output: Path, show: bool = False) -> Non
     fig = plt.figure(figsize=(8, 6.5))
     ax = fig.add_subplot(projection="3d")
 
-    passed = viable_mask(df)
-    print(f"{passed.sum()} of {len(df)} designs pass (pLDDT>{MIN_PLDDT}, TM>{MIN_TM}, MPNN<{MAX_MPNN})")
-    print(f"  pLDDT>{MIN_PLDDT}: {(df['plddt'] > MIN_PLDDT).sum()}, TM>{MIN_TM}: {(df['tm_score'] > MIN_TM).sum()}, "
-          f"MPNN<{MAX_MPNN}: {(df['mpnn_score'] < MAX_MPNN).sum()}")
+    passed = df["included"]
+    print(f"{passed.sum()} of {len(df)} designs {SELECTION_LABEL}")
     for mask, color, label in [
-        (~passed, FAIL_COLOR, "fails a cutoff (absolute pLDDT)"),
-        (passed, PASS_COLOR, f"passes (pLDDT>{MIN_PLDDT}, TM>{MIN_TM}, MPNN<{MAX_MPNN})"),
+        (~passed, FAIL_COLOR, "not selected"),
+        (passed, PASS_COLOR, SELECTION_LABEL),
     ]:
         sub = df[mask]
         ax.scatter(
@@ -193,11 +195,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", type=Path, default=DEFAULT_CSV, help="designs_all.csv path")
     parser.add_argument("--output", type=Path, default=PLOTS_DIR / "folding_scores_3d.png")
-    parser.add_argument("--annotate", action="store_true", help="add an 'included' column to the CSV")
+    parser.add_argument("--no-annotate", action="store_true",
+                        help="plot only: do not refresh the 'included'/delta columns in the CSV first (they must already be up to date)")
     parser.add_argument("--show", action="store_true", help="open an interactive window")
     args = parser.parse_args()
-    if args.annotate:
-        annotate_csv(args.csv)
+    if not args.no_annotate:
+        annotate_csv(args.csv)  # the plots colour by the CSV's `included` column, so refresh it first
+    if "included" not in pd.read_csv(args.csv, nrows=1):
+        raise SystemExit("designs_all.csv has no 'included' column; run without --no-annotate first")
     plot_folding_scores(args.csv, args.output, args.show)
     with_native = add_native(pd.read_csv(args.csv), args.csv)
     if "delta_plddt" in with_native and with_native["delta_plddt"].notna().any():
